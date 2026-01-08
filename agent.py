@@ -2,6 +2,7 @@ from skillkit import SkillManager
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.callbacks.base import BaseCallbackHandler
 import importlib.util
 import copy
 
@@ -39,21 +40,24 @@ def load_skills(skill_dir: str):
 
 def skill_to_tool(skill):
     """将 skill 转换为工具函数"""
-    def tool_func(expression: str) -> str:
-        """执行技能计算
-        
-        Args:
-            expression: 要计算的数学表达式
-            
-        Returns:
-            计算结果字符串
-        """
-        return skill['run'](expression=expression)
-    
+
+    def tool_func(**tool_kwargs):
+        """执行技能，参数直接透传给对应的 run 函数"""
+        # langchain 若无法解析参数签名，可能将入参包在 kwargs / tool_kwargs 字段里
+        for wrapper_key in ("kwargs", "tool_kwargs"):
+            if (
+                len(tool_kwargs) == 1
+                and wrapper_key in tool_kwargs
+                and isinstance(tool_kwargs[wrapper_key], dict)
+            ):
+                tool_kwargs = tool_kwargs[wrapper_key]
+                break
+        return skill["run"](**tool_kwargs)
+
     # 设置函数名称和文档字符串
-    tool_func.__name__ = skill['name']
-    tool_func.__doc__ = skill['description'] or f"执行 {skill['name']} 技能"
-    
+    tool_func.__name__ = skill["name"]
+    tool_func.__doc__ = skill["description"] or f"执行 {skill['name']} 技能"
+
     # 使用 @tool 装饰器创建工具
     return tool(tool_func)
 
@@ -70,6 +74,41 @@ def build_agent():
         debug=True
     )
     return agent
+
+
+class LlmPromptRecorder(BaseCallbackHandler):
+    """记录每次LLM调用的完整报文，包括系统提示和嵌入的工具列表。"""
+
+    def __init__(self, conversation_manager: ConversationManager):
+        self.conversation_manager = conversation_manager
+        self.recorded_prompts = []
+
+    def _make_json_safe(self, value):
+        """递归将值转换为可JSON序列化的类型。"""
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            return {k: self._make_json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._make_json_safe(v) for v in value]
+        return str(value)
+
+    def on_chat_model_start(self, serialized, messages, **kwargs):
+        """在模型调用前记录最终发往LLM的完整消息列表。"""
+        model_info = (
+            serialized if isinstance(serialized, dict) else {"model": str(serialized)}
+        )
+        invocation_params = kwargs.get("invocation_params") or {}
+
+        for batch in messages:
+            self.recorded_prompts.append(
+                {
+                    "call_index": len(self.recorded_prompts) + 1,
+                    "model": self._make_json_safe(model_info),
+                    "invocation_params": self._make_json_safe(invocation_params),
+                    "messages": self.conversation_manager._serialize_messages(batch),
+                }
+            )
 
 
 def chat_with_agent(
@@ -103,7 +142,8 @@ def chat_with_agent(
     
     # 调用agent
     try:
-        result = agent.invoke(llm_input)
+        prompt_recorder = LlmPromptRecorder(conversation_manager)
+        result = agent.invoke(llm_input, config={"callbacks": [prompt_recorder]})
         
         # 提取工具调用信息
         tool_calls = []
@@ -167,7 +207,8 @@ def chat_with_agent(
             llm_input=llm_input,
             llm_output=result,
             tool_calls=tool_calls if tool_calls else None,
-            final_response=final_response
+            final_response=final_response,
+            llm_prompts=prompt_recorder.recorded_prompts,
         )
         
         return final_response
@@ -181,7 +222,8 @@ def chat_with_agent(
             llm_input=llm_input,
             llm_output={"error": str(e)},
             tool_calls=None,
-            final_response=error_msg
+            final_response=error_msg,
+            llm_prompts=prompt_recorder.recorded_prompts if "prompt_recorder" in locals() else [],
         )
         return error_msg
 

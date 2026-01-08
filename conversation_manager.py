@@ -60,7 +60,8 @@ class ConversationManager:
         llm_input: Dict[str, Any],
         llm_output: Dict[str, Any],
         tool_calls: List[Dict[str, Any]] = None,
-        final_response: str = None
+        final_response: str = None,
+        llm_prompts: Optional[List[Dict[str, Any]]] = None,
     ):
         """
         添加一轮对话记录
@@ -72,6 +73,7 @@ class ConversationManager:
             llm_output: 大模型返回的内容
             tool_calls: 工具调用列表
             final_response: 最终返回给用户的响应
+            llm_prompts: 每次LLM调用时实际发送的完整报文（含系统/工具提示）
         """
         conversation = self.load_conversation(conversation_id)
         
@@ -82,7 +84,8 @@ class ConversationManager:
             "llm_input": self._serialize_messages(llm_input),
             "llm_output": self._serialize_messages(llm_output),
             "tool_calls": tool_calls or [],
-            "final_response": final_response
+            "final_response": final_response,
+            "llm_prompts": llm_prompts or [],
         }
         
         conversation["turns"].append(turn)
